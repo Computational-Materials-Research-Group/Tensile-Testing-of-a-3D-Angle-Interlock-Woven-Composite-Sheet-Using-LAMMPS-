@@ -1,0 +1,94 @@
+# Uniaxial tensile test of a finite woven-composite sheet (coupon with grips)
+# Bonded-particle model (LAMMPS BPM package), LJ reduced units
+# Use with build_woven.py, periodic = False
+
+units           lj
+atom_style      bond
+boundary        s s s                 # free edges and surfaces
+newton          on off
+comm_modify     vel yes cutoff 3.0
+special_bonds   lj 0.0 1.0 1.0 coul 1.0 1.0 1.0
+read_data       woven.data
+
+# ---- interactions -------------------------------------------------------
+pair_style      bpm/spring            # contact repulsion (non-bonded beads)
+pair_coeff      * * 1.0 1.0 1.0
+
+bond_style      bpm/spring            # breakable springs, r0 = initial length
+#               type  k      eps_crit  damping
+bond_coeff      1     100.0  0.030     1.0     # fibre, axial
+bond_coeff      2     20.0   0.050     1.0     # fibre, transverse
+bond_coeff      3     5.0    0.080     1.0     # matrix
+bond_coeff      4     3.0    0.040     1.0     # yarn/matrix interface
+
+neighbor        0.4 bin
+neigh_modify    every 1 delay 0 check yes
+timestep        0.005
+
+# ---- grips: clamp both ends of the sheet --------------------------------
+variable        grip  equal 10.0                      # grip length
+variable        xmin  equal bound(all,xmin)
+variable        xmax  equal bound(all,xmax)
+variable        xL    equal ${xmin}+${grip}
+variable        xR    equal ${xmax}-${grip}
+region          rL block INF ${xL} INF INF INF INF
+region          rR block ${xR} INF INF INF INF INF
+group           gripL region rL
+group           gripR region rR
+group           grips union gripL gripR
+group           mobile subtract all grips
+
+# gauge length and initial cross-section
+variable        Lg    equal ${xR}-${xL}
+variable        W0    equal bound(all,ymax)-bound(all,ymin)
+variable        W     equal ${W0}
+variable        T0    equal bound(all,zmax)-bound(all,zmin)
+variable        T     equal ${T0}
+variable        A0    equal ${W}*${T}
+print           "gauge length ${Lg}, width ${W}, thickness ${T}, area ${A0}"
+
+# ---- relax --------------------------------------------------------------
+velocity        mobile create 1.0e-6 4928459 dist gaussian
+velocity        grips set 0.0 0.0 0.0
+fix             hold grips setforce 0.0 0.0 0.0
+fix             int mobile nve
+fix             damp mobile langevin 1.0e-6 1.0e-6 5.0 48279
+thermo          500
+run             2000
+unfix           hold
+unfix           damp                  # no absolute-velocity drag while pulling;
+                                      # bpm bond/pair damping (gamma) dissipates energy
+
+# ---- tensile loading: left grip fixed, right grip pulled at constant v --
+variable        erate equal 5.0e-5                    # nominal strain rate
+variable        vpull equal ${erate}*${Lg}
+fix             mvL gripL move linear 0.0 0.0 0.0
+fix             mvR gripR move linear ${vpull} 0.0 0.0
+# linear velocity profile in the gauge section -> no shock wave at start
+velocity        mobile ramp vx 0.0 ${vpull} x ${xL} ${xR} sum yes
+
+variable        xR0   equal xcm(gripR,x)-xcm(gripL,x)
+variable        xR0f  equal ${xR0}
+variable        strain equal (xcm(gripR,x)-xcm(gripL,x)-v_xR0f)/v_Lg
+compute         fR gripR reduce sum fx                # reaction force on right grip
+compute         fL gripL reduce sum fx
+variable        force  equal 0.5*(c_fL-c_fR)        # tensile force (positive in tension)
+variable        stress equal v_force/v_A0
+
+compute         nb all nbond/atom
+compute         nbtot all reduce sum c_nb
+variable        bonds equal c_nbtot/2
+
+fix             ss all ave/time 10 20 200 v_strain v_stress v_force v_bonds file stress_strain.txt
+thermo_style    custom step v_strain v_stress v_force v_bonds ke
+thermo          2000
+# per-bead stress for stress maps (stress*volume; bead volume ~ 1 sigma^3)
+# c_sa[1] = sigma_xx (positive = tension), von Mises from all 6 components
+compute         sa all stress/atom NULL
+variable        sxx atom c_sa[1]
+variable        vm  atom sqrt(0.5*((c_sa[1]-c_sa[2])^2+(c_sa[2]-c_sa[3])^2+(c_sa[3]-c_sa[1])^2)+3*(c_sa[4]^2+c_sa[5]^2+c_sa[6]^2))
+fix             sav all ave/atom 10 40 4000 v_sxx v_vm        # time-averaged, less noisy
+dump            d1 all custom 4000 dump.woven id mol type x y z c_nb f_sav[1] f_sav[2]
+dump_modify     d1 colname f_sav[1] sxx colname f_sav[2] von_mises
+dump_modify     d1 sort id
+run             400000                                # ~10% strain at erate 5e-5

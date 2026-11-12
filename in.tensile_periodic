@@ -1,0 +1,55 @@
+# Uniaxial tensile test of a periodic woven-composite RVE (infinite sheet)
+# Bonded-particle model (LAMMPS BPM package), LJ reduced units
+# Use with build_woven.py, periodic = True
+
+units           lj
+atom_style      bond
+boundary        p p s                 # periodic in-plane, free surfaces in z
+newton          on off
+comm_modify     vel yes cutoff 3.0
+special_bonds   lj 0.0 1.0 1.0 coul 1.0 1.0 1.0
+read_data       woven.data
+
+pair_style      bpm/spring
+pair_coeff      * * 1.0 1.0 1.0
+
+bond_style      bpm/spring
+#               type  k      eps_crit  damping
+bond_coeff      1     100.0  0.030     1.0     # fibre, axial
+bond_coeff      2     20.0   0.050     1.0     # fibre, transverse
+bond_coeff      3     5.0    0.080     1.0     # matrix
+bond_coeff      4     3.0    0.040     1.0     # yarn/matrix interface
+
+neighbor        0.4 bin
+neigh_modify    every 1 delay 0 check yes
+timestep        0.005
+
+velocity        all create 1.0e-6 4928459 dist gaussian
+fix             int all nve
+fix             damp all langevin 1.0e-6 1.0e-6 5.0 48279
+thermo          500
+run             2000
+unfix           damp                  # no absolute-velocity drag while pulling;
+                                      # bpm bond/pair damping (gamma) dissipates energy
+
+variable        L0 equal lx
+variable        L0f equal ${L0}
+variable        strain equal (lx-v_L0f)/v_L0f
+variable        stress equal -pxx          # box volume = laminate volume (z shrink-wrapped)
+
+compute         nb all nbond/atom
+compute         nbtot all reduce sum c_nb
+variable        bonds equal c_nbtot/2
+
+fix             load all deform 1 x erate 5.0e-5 remap x
+fix             ss all ave/time 10 20 200 v_strain v_stress v_bonds file stress_strain.txt
+thermo_style    custom step v_strain v_stress pyy pzz v_bonds ke
+thermo          2000
+compute         sa all stress/atom NULL
+variable        sxx atom c_sa[1]
+variable        vm  atom sqrt(0.5*((c_sa[1]-c_sa[2])^2+(c_sa[2]-c_sa[3])^2+(c_sa[3]-c_sa[1])^2)+3*(c_sa[4]^2+c_sa[5]^2+c_sa[6]^2))
+fix             sav all ave/atom 10 40 4000 v_sxx v_vm
+dump            d1 all custom 4000 dump.woven id mol type x y z c_nb f_sav[1] f_sav[2]
+dump_modify     d1 colname f_sav[1] sxx colname f_sav[2] von_mises
+dump_modify     d1 sort id
+run             400000
